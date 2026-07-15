@@ -1,0 +1,36 @@
+#!/bin/bash
+# Post-push hook: Auto-publish release after successful git push
+# Completes the automation chain: git push → make publish-release → NATS deploy
+# Triggered automatically after 'git push' completes successfully
+
+set -e
+
+# Capture git branch info
+current_branch=$(git rev-parse --abbrev-ref HEAD)
+remote=$(git config --get branch."$current_branch".remote || echo "origin")
+
+# Only auto-publish on main/master branch
+if [[ ! "$current_branch" =~ ^(main|master)$ ]]; then
+    exit 0
+fi
+
+# Only auto-publish if the push was to origin/main (not a PR branch or other tracking)
+pushed_to=$(git rev-parse --abbrev-ref "@{push}" 2>/dev/null || echo "$remote/$current_branch")
+if [[ ! "$pushed_to" =~ (origin/(main|master)|$remote/(main|master))$ ]]; then
+    exit 0
+fi
+
+echo ""
+echo "🚀 Post-push: Auto-publishing release..."
+echo ""
+
+# Run publish-release in the background so the user gets the shell prompt back quickly
+# but capture output for debugging if needed
+if make publish-release > /tmp/.publish-release.log 2>&1; then
+    echo "✅ Release published successfully"
+    echo "   Next: deploy_pipeline_bot will pick up deploy.release.requested from NATS"
+else
+    echo "⚠️  Release publish failed — check output:"
+    tail -30 /tmp/.publish-release.log
+    exit 1
+fi
