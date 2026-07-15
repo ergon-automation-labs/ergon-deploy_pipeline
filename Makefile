@@ -142,10 +142,22 @@ publish-release: release
 	echo "$$VERSION $$(date -u +%s)" > .release-published; \
 	echo "✓ Release marker written"; \
 	echo ""; \
+	echo "Publishing deploy.release.requested to NATS..."; \
+	BOT_SHORT=$$(echo "deploy_pipeline_bot" | sed 's/_bot$$//'); \
+	REPO_SLUG=$$(git config --get remote.origin.url | sed -E 's#.*[:/]([^/]+/[^/]+)\.git#\1#'); \
+	MONOREPO_ROOT=$$($(call _FIND_MONOREPO_ROOT)); \
+	NATS_PUBLISH_SCRIPT="$$MONOREPO_ROOT/bot_army_infra/salt/common/files/nats_publish.sh"; \
+	if [ -n "$$MONOREPO_ROOT" ] && [ -f "$$NATS_PUBLISH_SCRIPT" ]; then \
+		PAYLOAD=$$(printf '{"bot":"%s","repo":"%s","tag":"v%s","version":"%s"}' "$$BOT_SHORT" "$$REPO_SLUG" "$$VERSION" "$$VERSION"); \
+		bash "$$NATS_PUBLISH_SCRIPT" deploy.release.requested "$$PAYLOAD" || echo "⚠️  NATS publish failed (non-fatal — deploy via make deploy-bot or Jenkins instead)"; \
+	else \
+		echo "⚠️  nats_publish.sh not found (monorepo root: $${MONOREPO_ROOT:-not found}) — skipping deploy.release.requested"; \
+	fi; \
+	echo ""; \
 	echo "Next steps:"; \
-	echo "1. Run: make deploy-bot"; \
-	echo "2. Jenkins will deploy the release"; \
-	echo "3. Check deployment status: make jenkins-logs"
+	echo "1. If this bot's ci_engine is 'nats' (pillar/common.sls in bot_army_infra), deploy_pipeline_bot deploys it automatically."; \
+	echo "2. Otherwise: make deploy-bot, or wait for Jenkins polling"; \
+	echo "3. Check status: make jenkins-logs (Jenkins) or watch ops.deploy.* on NATS (deploy_pipeline_bot path)"
 
 push-and-publish:
 	@git push && $(MAKE) publish-release

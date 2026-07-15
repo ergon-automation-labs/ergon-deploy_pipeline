@@ -4,7 +4,7 @@ defmodule BotArmyDeployPipeline.MixProject do
   def project do
     [
       app: :bot_army_deploy_pipeline,
-      version: "0.1.0",
+      version: "0.2.0",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -26,8 +26,10 @@ defmodule BotArmyDeployPipeline.MixProject do
   defp deps do
     [
       {:bot_army_library_core, path: "../../elixir_bots/bot_army_library_core", override: true},
-      {:bot_army_library_runtime, path: "../../elixir_bots/bot_army_library_runtime", override: true},
-      {:bot_army_library_learning, path: "../../elixir_bots/bot_army_library_learning", override: true},
+      {:bot_army_library_runtime,
+       path: "../../elixir_bots/bot_army_library_runtime", override: true},
+      {:bot_army_library_learning,
+       path: "../../elixir_bots/bot_army_library_learning", override: true},
       {:ecto_sql, "~> 3.10"},
       {:postgrex, "~> 0.17"},
       {:jason, "~> 1.4"},

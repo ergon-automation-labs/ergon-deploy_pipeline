@@ -21,20 +21,12 @@ defmodule BotArmyDeployPipeline.Application do
 
     children =
       []
-      |> maybe_add_repo()
       |> maybe_add_pulse_publisher()
+      |> maybe_add_nats_consumer()
       |> maybe_add_workers()
 
     opts = [strategy: :one_for_one, name: BotArmyDeployPipeline.Supervisor]
     Supervisor.start_link(children, opts)
-  end
-
-  defp maybe_add_repo(children) do
-    if @env == :test do
-      children
-    else
-      [{BotArmyDeployPipeline.Repo, []} | children]
-    end
   end
 
   defp maybe_add_pulse_publisher(children) do
@@ -42,6 +34,14 @@ defmodule BotArmyDeployPipeline.Application do
       children
     else
       [{BotArmyDeployPipeline.PulsePublisher, []} | children]
+    end
+  end
+
+  defp maybe_add_nats_consumer(children) do
+    if @env == :test do
+      children
+    else
+      [{BotArmyDeployPipeline.NATS.Consumer, []} | children]
     end
   end
 

@@ -18,9 +18,11 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
 
   # Register subjects with their metadata for runtime discovery
   @subjects [
-    # Add your subjects here:
-    # %{subject: "example.task.list", type: :request_reply, description: "List tasks"},
-    # %{subject: "example.event.>", type: :subscribe, description: "Example events"}
+    %{
+      subject: "deploy.release.requested",
+      type: :subscribe,
+      description: "Triggered by make publish-release; drives Salt state.apply deploy"
+    }
   ]
 
   def start_link(opts) do
@@ -49,7 +51,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
 
         subscriptions =
           [
-            # Add your subjects here
+            "deploy.release.requested"
           ]
           |> Enum.map(fn subject ->
             case Gnat.sub(conn, self(), subject) do
@@ -129,8 +131,13 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   end
 
   # Message routing
-  defp route_message(message, topic) do
-    # Route decoded messages to appropriate handlers
+  defp route_message(message, "deploy.release.requested" = topic) do
+    Logger.debug("Routing message from #{topic}")
+    payload = Map.get(message, "payload") || %{}
+    BotArmyDeployPipeline.Deploy.handle_release_requested(payload)
+  end
+
+  defp route_message(_message, topic) do
     Logger.debug("Routing message from #{topic}")
   end
 
