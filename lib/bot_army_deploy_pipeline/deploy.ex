@@ -111,12 +111,58 @@ defmodule BotArmyDeployPipeline.Deploy do
   end
 
   defp deploy_to_node(bot_short, node, release_tag, version) do
-    Logger.info("[Deploy.v1] Deploying to #{node}: #{bot_short}")
-
     Logger.info(
-      "[Deploy.v1] Would call deploy_bot_with_summary.sh #{bot_short} #{node} (tag=#{release_tag}, v=#{version})"
+      "[Deploy.v1] Deploying to #{node}: #{bot_short} (tag=#{release_tag}, v=#{version})"
     )
 
-    :ok
+    script_path = Path.join(infra_scripts_dir(), "deploy_bot_with_summary.sh")
+
+    case File.exists?(script_path) do
+      true ->
+        invoke_deploy_script(script_path, bot_short, node)
+
+      false ->
+        Logger.error("[Deploy.v1] Script not found: #{script_path}")
+        {:error, :script_not_found}
+    end
+  end
+
+  defp invoke_deploy_script(script_path, bot_short, node) do
+    Logger.info("[Deploy.v1] Invoking: #{script_path} #{bot_short} #{node}")
+
+    case System.cmd("bash", [script_path, bot_short, node],
+           stderr_to_stdout: true,
+           timeout: 600_000
+         ) do
+      {output, 0} ->
+        Logger.info("[Deploy.v1] Deployment succeeded on #{node}")
+        Logger.debug("[Deploy.v1] Output:\n#{output}")
+        :ok
+
+      {output, exit_code} ->
+        Logger.error("[Deploy.v1] Deployment failed on #{node} (exit code: #{exit_code})")
+
+        Logger.error("[Deploy.v1] Output:\n#{output}")
+        {:error, :deployment_failed}
+    end
+  end
+
+  defp infra_scripts_dir do
+    # Find the bot_army_infra directory
+    # Path: /Users/abby/code/bots/bot_army_deploy_pipeline -> /Users/abby/code/bots -> /Users/abby/code
+    # Then look for bot_army_infra/scripts
+    case File.cwd() do
+      {:ok, cwd} ->
+        # Try multiple possible paths
+        [
+          Path.join(cwd, "bot_army_infra/scripts"),
+          "/Users/abby/code/bots/bot_army_infra/scripts",
+          "/Users/abby/code/elixir_bots/bot_army_infra/scripts"
+        ]
+        |> Enum.find("", &File.dir?/1)
+
+      {:error, _} ->
+        "/Users/abby/code/elixir_bots/bot_army_infra/scripts"
+    end
   end
 end
