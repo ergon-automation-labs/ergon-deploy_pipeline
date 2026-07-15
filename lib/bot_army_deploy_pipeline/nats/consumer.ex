@@ -141,10 +141,9 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   end
 
   # Message routing
-  defp route_message(message, "deploy.release.requested" = topic) do
-    Logger.debug("Routing message from #{topic}")
-    payload = Map.get(message, "payload") || %{}
-    BotArmyDeployPipeline.Deploy.handle_release_requested(payload)
+  defp route_message(_message, "deploy.release.requested" = topic) do
+    Logger.debug("Received #{topic} — routed to deploy skill for processing")
+    # The deploy skill (BotArmyDeployPipeline.Skills.Deploy) handles this via the skill framework
   end
 
   defp route_message(_message, topic) do

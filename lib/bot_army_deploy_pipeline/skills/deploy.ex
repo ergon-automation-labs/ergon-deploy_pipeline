@@ -110,24 +110,19 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
   # ============================================================================
 
   defp deploy_v1(bot_short, repo_slug, release_tag, version, ctx) do
-    # This will invoke deploy_bot_with_summary.sh, which:
-    # 1. Determines which node(s) run this bot (from pillar enabled_repositories)
-    # 2. Applies Salt state bots.<bot>_bot to each node
-    # 3. Creates/migrates database
-    # 4. Renders plist and starts service
+    Logger.info(
+      "[Deploy] v1 skill: routing to Deploy.deploy_v1 for #{bot_short} (ctx.bot_id=#{ctx.bot_id})"
+    )
 
-    # Placeholder: In Phase 1, this calls the existing shell script
-    # For now, return success with a marker that this path was invoked
-    Logger.info("[Deploy] v1: Would invoke deploy_bot_with_summary.sh for #{bot_short}")
+    case BotArmyDeployPipeline.Deploy.deploy_v1(bot_short, repo_slug, release_tag, version) do
+      {:ok, result} ->
+        Logger.info("[Deploy] v1 succeeded: #{inspect(result)}")
+        {:ok, Map.put(result, :version, version)}
 
-    {:ok,
-     %{
-       bot: bot_short,
-       version: version,
-       release_tag: release_tag,
-       handler: :v1_salt_launchd,
-       status: :success
-     }}
+      {:error, reason} ->
+        Logger.error("[Deploy] v1 failed: #{inspect(reason)}")
+        {:error, reason}
+    end
   end
 
   # ============================================================================
@@ -135,25 +130,18 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
   # ============================================================================
 
   defp deploy_v2(bot_short, repo_slug, release_tag, version, ctx) do
-    # This will:
-    # 1. Pull the latest Docker image from registry for this bot
-    # 2. Update docker-compose.yml on appropriate node(s)
-    # 3. Restart the service via docker-compose
-    # 4. Verify registration with registry
-
-    # Placeholder: In Phase 1, this is scaffolded but not yet connected to real v2 bots.
-    # The path exists so when v2 bots migrate in bot_army_v2, the routing is ready.
     Logger.info(
-      "[Deploy] v2: Scaffolded handler for docker-compose (bot_army_v2 integration) — #{bot_short}"
+      "[Deploy] v2 skill: routing to Deploy.deploy_v2 for #{bot_short} (ctx.bot_id=#{ctx.bot_id})"
     )
 
-    {:ok,
-     %{
-       bot: bot_short,
-       version: version,
-       release_tag: release_tag,
-       handler: :v2_docker_compose_nomad,
-       status: :success
-     }}
+    case BotArmyDeployPipeline.Deploy.deploy_v2(bot_short, repo_slug, release_tag, version) do
+      {:ok, result} ->
+        Logger.info("[Deploy] v2 succeeded: #{inspect(result)}")
+        {:ok, Map.put(result, :version, version)}
+
+      {:error, reason} ->
+        Logger.error("[Deploy] v2 failed: #{inspect(reason)}")
+        {:error, reason}
+    end
   end
 end
