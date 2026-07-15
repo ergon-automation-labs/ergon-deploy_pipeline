@@ -50,20 +50,8 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
         Logger.info("Connected to NATS, subscribing to topics")
 
         subscriptions =
-          [
-            "deploy.release.requested"
-          ]
-          |> Enum.map(fn subject ->
-            case Gnat.sub(conn, self(), subject) do
-              {:ok, sub} ->
-                Logger.info("Subscribed to #{subject}")
-                sub
-
-              {:error, reason} ->
-                Logger.error("Failed to subscribe to #{subject}: #{inspect(reason)}")
-                nil
-            end
-          end)
+          ["deploy.release.requested"]
+          |> Enum.map(&subscribe(conn, &1))
           |> Enum.filter(&(not is_nil(&1)))
 
         # Register subjects for runtime discovery
@@ -78,6 +66,18 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     end
   end
 
+  defp subscribe(conn, subject) do
+    case Gnat.sub(conn, self(), subject) do
+      {:ok, sub} ->
+        Logger.info("Subscribed to #{subject}")
+        sub
+
+      {:error, reason} ->
+        Logger.error("Failed to subscribe to #{subject}: #{inspect(reason)}")
+        nil
+    end
+  end
+
   @impl true
   def handle_info(:connect_retry, state) do
     {:noreply, state, {:continue, :connect}}
@@ -86,27 +86,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   @impl true
   def handle_info({:msg, msg}, state) do
     BotArmyRuntime.Tracing.with_consumer_span(msg.topic, Map.get(msg, :headers), fn ->
-      Logger.debug("Received NATS message on subject: #{msg.topic}")
-
-      # Handle request/reply patterns
-      if msg.reply_to do
-        case msg.topic do
-          # Add your request/reply handlers here
-          # "example.task.list" ->
-          #   handle_task_list(msg, state)
-          _ ->
-            Logger.debug("Unknown request/reply subject: #{msg.topic}")
-        end
-      else
-        # Handle pub/sub messages
-        case BotArmyCore.NATS.Decoder.decode(msg.body) do
-          {:ok, decoded_message} ->
-            route_message(decoded_message, msg.topic)
-
-          {:error, reason} ->
-            Logger.warning("Failed to decode message from #{msg.topic}: #{inspect(reason)}")
-        end
-      end
+      process_message(msg)
     end)
 
     {:noreply, state}
@@ -128,6 +108,36 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   @impl true
   def handle_info(:reconnect, state) do
     {:noreply, state, {:continue, :connect}}
+  end
+
+  defp process_message(msg) do
+    Logger.debug("Received NATS message on subject: #{msg.topic}")
+
+    if msg.reply_to do
+      handle_request_reply(msg)
+    else
+      handle_pub_sub(msg)
+    end
+  end
+
+  defp handle_request_reply(msg) do
+    case msg.topic do
+      # Add your request/reply handlers here
+      # "example.task.list" ->
+      #   handle_task_list(msg, state)
+      _ ->
+        Logger.debug("Unknown request/reply subject: #{msg.topic}")
+    end
+  end
+
+  defp handle_pub_sub(msg) do
+    case BotArmyCore.NATS.Decoder.decode(msg.body) do
+      {:ok, decoded_message} ->
+        route_message(decoded_message, msg.topic)
+
+      {:error, reason} ->
+        Logger.warning("Failed to decode message from #{msg.topic}: #{inspect(reason)}")
+    end
   end
 
   # Message routing

@@ -55,7 +55,8 @@ defmodule BotArmyDeployPipeline.PulsePublisher do
 
   @impl true
   def handle_cast({:record_metric, _key, _value}, state) do
-    # TODO: Track metric in state for next pulse publish
+    # Deploy outcomes are already published per-event via ops.deploy.complete/failed
+    # (BotArmyDeployPipeline.Deploy) - no separate metric accumulation needed here.
     {:noreply, state}
   end
 
@@ -70,8 +71,8 @@ defmodule BotArmyDeployPipeline.PulsePublisher do
       service: @service_name,
       timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
       health: signal,
-      # TODO: Add domain-specific metrics here
-      # Examples: active_sessions, items_processed, errors_in_window
+      # deploy_pipeline_bot is event-triggered, not request-driven - per-deploy
+      # outcomes go out via ops.deploy.complete/failed instead of pulse metrics.
       metrics: %{}
     }
 
@@ -87,7 +88,9 @@ defmodule BotArmyDeployPipeline.PulsePublisher do
   defp publish_system_health(%{started_at: started_at}) do
     tenant_id = System.get_env("BOT_ARMY_TENANT_ID") || BotArmyRuntime.Tenant.default_tenant_id()
     signal = health_signal()
-    uptime_seconds = DateTime.diff(DateTime.utc_now() |> DateTime.truncate(:second), started_at, :second)
+
+    uptime_seconds =
+      DateTime.diff(DateTime.utc_now() |> DateTime.truncate(:second), started_at, :second)
 
     case BotArmyRuntime.SynapseHealth.publish(
            source_node: node() |> Atom.to_string(),
@@ -106,11 +109,9 @@ defmodule BotArmyDeployPipeline.PulsePublisher do
   end
 
   defp health_signal do
-    # TODO: Implement health signal logic based on domain metrics
-    # Examples:
-    #   - Return :critical if error_count > threshold
-    #   - Return :degraded if activity_count == 0
-    #   - Return :nominal otherwise
+    # Liveness-only: deploy_pipeline_bot has no ongoing internal state whose
+    # degradation would be meaningful here - deploy success/failure is
+    # reported per-event via ops.deploy.complete/failed, not polled health.
     :nominal
   end
 end
