@@ -14,6 +14,16 @@ defmodule BotArmyDeployPipeline.Application do
 
   @env Mix.env()
 
+  # dialyzer analyzes this module under MIX_ENV=dev by default, where `@env` is the
+  # compile-time literal `:dev` — making every `@env == :test` branch below a provable
+  # tautology (dialyxir :exact_eq). This is the fleet-wide compile-time env-gating pattern
+  # (CLAUDE.md: "Application.ex gates stores with `if @env == :test`"), not a runtime
+  # defect: each release is compiled once per env and only one branch is ever live in a
+  # given build. Scoped to exactly the three gating functions below — tracked fleet-wide
+  # in GTD task deploy-pipeline-dialyzer-env-gating.
+  @dialyzer {:nowarn_function,
+             maybe_add_pulse_publisher: 1, maybe_add_nats_consumer: 1, maybe_add_workers: 1}
+
   @impl true
   def start(_type, _args) do
     # Note: BotArmyRuntime.Telemetry and BotArmyRuntime.NATS.Connection are started
