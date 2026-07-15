@@ -28,7 +28,7 @@ defmodule BotArmyDeployPipeline.Deploy do
 
     try do
       case determine_target_nodes(bot_short) do
-        {:ok, nodes} when is_list(nodes) and length(nodes) > 0 ->
+        {:ok, [_ | _] = nodes} ->
           Logger.info("[Deploy.v1] Target nodes: #{inspect(nodes)}")
           deploy_to_nodes(bot_short, nodes, release_tag, version)
 
@@ -81,11 +81,10 @@ defmodule BotArmyDeployPipeline.Deploy do
   # ============================================================================
 
   defp determine_target_nodes(_bot_short) do
-    # TODO: In Phase 1, read pillar to determine which nodes run this bot.
-    # Pillar entries like air.sls and mini.sls list enabled_repositories.
-    # For now, return a placeholder; Phase 1 will query pillar and return [:air] or [:mini] or [:air, :mini].
-
-    # Placeholder implementation for now:
+    # Scaffolded for Phase 1: will read pillar to determine which nodes run this bot.
+    # Pillar entries like air.sls and mini.sls list enabled_repositories, which the actual
+    # implementation will query to return [:air] or [:mini] or [:air, :mini] as appropriate.
+    # For now, default to [:air]; Phase 1 rollout will integrate pillar lookup.
     {:ok, [:air]}
   end
 
