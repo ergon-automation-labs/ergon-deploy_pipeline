@@ -31,14 +31,6 @@ defmodule BotArmyDeployPipeline.Deploy do
         {:ok, [_ | _] = nodes} ->
           Logger.info("[Deploy.v1] Target nodes: #{inspect(nodes)}")
           deploy_to_nodes(bot_short, nodes, release_tag, version)
-
-        {:error, reason} ->
-          Logger.error("[Deploy.v1] Failed to determine target nodes: #{inspect(reason)}")
-          {:error, :node_discovery_failed}
-
-        {:ok, []} ->
-          Logger.error("[Deploy.v1] No nodes configured for #{bot_short}")
-          {:error, :no_nodes_found}
       end
     rescue
       e ->

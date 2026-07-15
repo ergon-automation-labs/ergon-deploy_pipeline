@@ -56,15 +56,9 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
       Logger.info("[Deploy] Deploying #{bot_short} v#{version} from #{repo_slug}")
 
       # Lookup bot metadata from pillar
-      case lookup_bot_metadata(bot_short) do
-        {:ok, bot_metadata} ->
-          bot_type = Map.get(bot_metadata, :bot_type, :v1)
-          deploy_via_handler(bot_type, bot_short, repo_slug, release_tag, version, ctx)
-
-        {:error, reason} ->
-          Logger.error("[Deploy] Failed to lookup bot metadata: #{inspect(reason)}")
-          {:error, :bot_not_found}
-      end
+      {:ok, bot_metadata} = lookup_bot_metadata(bot_short)
+      bot_type = Map.get(bot_metadata, :bot_type, :v1)
+      deploy_via_handler(bot_type, bot_short, repo_slug, release_tag, version, ctx)
     rescue
       e ->
         Logger.error("[Deploy] Execution failed: #{inspect(e)}")
@@ -114,15 +108,11 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
       "[Deploy] v1 skill: routing to Deploy.deploy_v1 for #{bot_short} (ctx.bot_id=#{ctx.bot_id})"
     )
 
-    case BotArmyDeployPipeline.Deploy.deploy_v1(bot_short, repo_slug, release_tag, version) do
-      {:ok, result} ->
-        Logger.info("[Deploy] v1 succeeded: #{inspect(result)}")
-        {:ok, Map.put(result, :version, version)}
+    {:ok, result} =
+      BotArmyDeployPipeline.Deploy.deploy_v1(bot_short, repo_slug, release_tag, version)
 
-      {:error, reason} ->
-        Logger.error("[Deploy] v1 failed: #{inspect(reason)}")
-        {:error, reason}
-    end
+    Logger.info("[Deploy] v1 succeeded: #{inspect(result)}")
+    {:ok, Map.put(result, :version, version)}
   end
 
   # ============================================================================
@@ -134,14 +124,10 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
       "[Deploy] v2 skill: routing to Deploy.deploy_v2 for #{bot_short} (ctx.bot_id=#{ctx.bot_id})"
     )
 
-    case BotArmyDeployPipeline.Deploy.deploy_v2(bot_short, repo_slug, release_tag, version) do
-      {:ok, result} ->
-        Logger.info("[Deploy] v2 succeeded: #{inspect(result)}")
-        {:ok, Map.put(result, :version, version)}
+    {:ok, result} =
+      BotArmyDeployPipeline.Deploy.deploy_v2(bot_short, repo_slug, release_tag, version)
 
-      {:error, reason} ->
-        Logger.error("[Deploy] v2 failed: #{inspect(reason)}")
-        {:error, reason}
-    end
+    Logger.info("[Deploy] v2 succeeded: #{inspect(result)}")
+    {:ok, Map.put(result, :version, version)}
   end
 end
