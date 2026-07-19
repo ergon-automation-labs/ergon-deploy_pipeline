@@ -1,36 +1,14 @@
 #!/bin/bash
-# Lightweight git pre-push hook for Bot Army bots
-# Keep push fast/reliable: run quick local validation only.
+# Git pre-push hook for Bot Army bots
+# Requires proof-of-validation file from `make push` to proceed.
 
 set -e
 
-# Find mix: env override → mise → PATH → fallback
-MIX_BIN="${MIX_BIN:-}"
-if [ -z "$MIX_BIN" ]; then
-  if command -v mise &>/dev/null; then
-    MIX_BIN="$(mise which mix 2>/dev/null || true)"
-  fi
-fi
-if [ -z "$MIX_BIN" ]; then
-  MIX_BIN="$(command -v mix 2>/dev/null || true)"
-fi
-if [ -z "$MIX_BIN" ]; then
-  MIX_BIN="/Users/abby/.local/share/mise/shims/mix"
-fi
-
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-export HEX_HOME="$REPO_ROOT/.cache/hex"
-export MIX_HOME="$REPO_ROOT/.cache/mix"
-mkdir -p "$HEX_HOME" "$MIX_HOME"
-
-echo "🔍 Running pre-push checks..."
-echo ""
-echo "⏱️  This may take 2-5 minutes (compilation + tests)"
-echo "⚠️  Do NOT interrupt with --no-verify — hooks are safety gates"
-echo ""
+PROOF_FILE="$REPO_ROOT/.push-validated"
+PROOF_MAX_AGE_SECONDS=300  # 5 minutes
 
 push_to_main=0
-remote_oid=""
 while read -r local_ref local_oid remote_ref remote_oid; do
   if [[ $remote_ref == "refs/heads/main" ]]; then
     push_to_main=1
@@ -38,44 +16,33 @@ while read -r local_ref local_oid remote_ref remote_oid; do
 done
 
 if [[ $push_to_main -eq 1 ]]; then
-  # Skip validation on first push (remote is empty)
-  if [[ -z "$remote_oid" ]]; then
-    echo "ℹ️  First push to main - skipping validation"
+  echo "🔍 Pre-push validation check (main branch)..."
+  echo ""
+
+  if [ ! -f "$PROOF_FILE" ]; then
+    echo "❌ Proof-of-validation file not found: $PROOF_FILE"
     echo ""
-    exit 0
+    echo "Run: make push"
+    echo "(This runs test → compile → credo, then creates proof file, then pushes)"
+    exit 1
   fi
-  echo "⚠️  Pushing to main branch - running fast validation only..."
-  echo ""
 
-  echo "📦 Ensuring Hex + dependencies..."
-  "$MIX_BIN" local.hex --force --force || {
-    echo "❌ mix local.hex failed - push aborted"
-    exit 1
-  }
-  "$MIX_BIN" deps.get --force || {
-    echo "❌ mix deps.get failed - push aborted"
-    exit 1
-  }
-  echo ""
+  PROOF_TIMESTAMP=$(cat "$PROOF_FILE")
+  CURRENT_TIMESTAMP=$(date +%s)
+  PROOF_AGE=$((CURRENT_TIMESTAMP - PROOF_TIMESTAMP))
 
-  echo "🔨 Compiling code..."
-  "$MIX_BIN" compile --force || {
-    echo "❌ Compilation failed - push aborted"
+  if [ "$PROOF_AGE" -gt "$PROOF_MAX_AGE_SECONDS" ]; then
+    echo "❌ Proof-of-validation is stale ($(($PROOF_AGE / 60)) minutes old)"
+    echo ""
+    echo "Run: make push"
+    echo "(To refresh validation and update proof file)"
     exit 1
-  }
+  fi
 
-  echo ""
-  echo "🧪 Running tests..."
-  "$MIX_BIN" test || {
-    echo "❌ Tests failed - push aborted"
-    exit 1
-  }
-
-  echo ""
-  echo "✅ Pre-push checks passed"
-  echo "ℹ️  Publish releases explicitly with: make push-and-publish"
+  echo "✅ Proof-of-validation verified (fresh within last 5 min)"
+  echo "📤 Proceeding with push..."
 else
-  echo "ℹ️  Pushing to feature branch - skipping pre-push validation"
+  echo "ℹ️  Pushing to feature branch - skipping validation"
 fi
 
 echo ""
