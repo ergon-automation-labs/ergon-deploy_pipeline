@@ -142,10 +142,11 @@ defmodule BotArmyDeployPipeline.Deploy do
     Logger.info("[Deploy.v1] Invoking: #{script_path} #{bot_short} #{node}")
 
     # Run the deploy script as abby (the deploy user with ssh keys + NOPASSWD
-    # sudo for salt/launchctl). From bot_army (launchd) this rides the scoped
-    # sudoers rule in salt/air/users.sls; from an interactive abby shell it is
-    # a no-op (self sudo).
-    case System.cmd("sudo", ["-n", "-u", "abby", "/bin/bash", script_path, bot_short, node],
+    # sudo for salt/launchctl). The script is executable with a #!/bin/bash
+    # shebang, so it is invoked directly — no /bin/bash prefix. From bot_army
+    # (launchd) this rides the scoped sudoers rule in salt/air/users.sls; from
+    # an interactive abby shell it is a no-op (self sudo).
+    case System.cmd("sudo", ["-n", "-u", "abby", script_path, bot_short, node],
            stderr_to_stdout: true
          ) do
       {output, 0} ->
