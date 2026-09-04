@@ -247,7 +247,9 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     if state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
   end
 
-  defp release_status(bot, target, version) do
+  defp release_status(bot, target, requested_version) do
+    requested = if is_binary(requested_version) and requested_version != "", do: requested_version
+
     cond do
       active = BotArmyDeployPipeline.JobTracker.find_active(bot, target) ->
         %{
@@ -257,21 +259,65 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
           "version" => active.version,
           "job_id" => active.job_id,
           "current_step" => active.current_step,
-          "started_at" => DateTime.to_iso8601(active.started_at)
+          "started_at" => DateTime.to_iso8601(active.started_at),
+          "requested_version" => requested
         }
 
-      finished = BotArmyDeployPipeline.JobTracker.latest_finished(bot, target) ->
+      response = resolved_state(bot, target, requested) ->
+        Map.put(response, "requested_version", requested)
+
+      true ->
         %{
-          "state" => Atom.to_string(finished.state),
+          "state" => "none",
           "bot" => bot,
           "target" => target,
-          "version" => finished.verified_version || finished.version,
-          "job_id" => finished.job_id,
-          "verified_running" => finished.verified_running,
-          "completed_at" => finished.completed_at && DateTime.to_iso8601(finished.completed_at)
+          "requested_version" => requested
+        }
+    end
+  end
+
+  # Answers the version actually asked about: when a version is requested,
+  # a finished/durable record for a DIFFERENT release does not count as that
+  # release's state — it surfaces as last_version/last_state context.
+  defp resolved_state(bot, target, requested) do
+    cond do
+      finished = BotArmyDeployPipeline.JobTracker.latest_finished(bot, target) ->
+        version = finished.verified_version || finished.version
+
+        if requested and version != requested do
+          ledger_response(bot, target, requested)
+        else
+          %{
+            "state" => Atom.to_string(finished.state),
+            "bot" => bot,
+            "target" => target,
+            "version" => version,
+            "job_id" => finished.job_id,
+            "verified_running" => finished.verified_running,
+            "completed_at" => finished.completed_at && DateTime.to_iso8601(finished.completed_at)
+          }
+        end
+
+      true ->
+        ledger_response(bot, target, requested)
+    end
+  end
+
+  defp ledger_response(bot, target, requested) do
+    record = BotArmyDeployPipeline.DeployLedger.latest(bot, target)
+
+    cond do
+      record && requested and record["version"] != requested ->
+        %{
+          "state" => "none",
+          "bot" => bot,
+          "target" => target,
+          "last_version" => record["version"],
+          "last_state" => ledger_state(record["status"]),
+          "source" => "deploy_ledger"
         }
 
-      record = BotArmyDeployPipeline.DeployLedger.latest(bot, target) ->
+      record ->
         %{
           "state" => ledger_state(record["status"]),
           "bot" => bot,
@@ -282,7 +328,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
         }
 
       true ->
-        %{"state" => "none", "bot" => bot, "target" => target}
+        nil
     end
   end
 
