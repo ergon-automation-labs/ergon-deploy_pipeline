@@ -191,7 +191,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
       )
 
     case BotArmyLibraryRuntime.NATS.Publisher.publish(subject, event_payload) do
-      :ok ->
+      {:ok, _subject} ->
         Logger.info("[Deploy] Published #{subject} for #{bot}")
 
       {:error, reason} ->
