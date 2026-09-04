@@ -154,11 +154,15 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
 
         Task.start(fn ->
           case BotArmyDeployPipeline.Skills.Deploy.execute(payload, ctx) do
-            {:ok, _} ->
-              Logger.info("[Deploy] Skill execution completed: #{inspect(payload["bot"])}")
+            {:ok, result} ->
+              bot = payload["bot"]
+              Logger.info("[Deploy] Skill execution completed: #{inspect(bot)}")
+              publish_deploy_outcome("ops.deploy.complete", bot, payload, result)
 
             {:error, reason} ->
+              bot = payload["bot"]
               Logger.error("[Deploy] Skill execution failed: #{inspect(reason)}")
+              publish_deploy_outcome("ops.deploy.failed", bot, payload, %{error: inspect(reason)})
           end
         end)
 
@@ -169,6 +173,30 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
 
   defp route_message(_message, topic) do
     Logger.debug("Routing message from #{topic}")
+  end
+
+  # Announce deploy outcomes on ops.deploy.complete / ops.deploy.failed so
+  # subscribers (claude_bridge subscribes ops.deploy.>) can react.
+  defp publish_deploy_outcome(subject, bot, payload, extra) do
+    event_payload =
+      Map.merge(
+        %{
+          "bot" => bot || "unknown",
+          "release_tag" => payload["tag"],
+          "version" => payload["version"],
+          "target" => payload["target"],
+          "deployed_by" => "deploy_pipeline_bot"
+        },
+        extra
+      )
+
+    case BotArmyLibraryRuntime.NATS.Publisher.publish(subject, event_payload) do
+      :ok ->
+        Logger.info("[Deploy] Published #{subject} for #{bot}")
+
+      {:error, reason} ->
+        Logger.warning("[Deploy] Failed to publish #{subject}: #{inspect(reason)}")
+    end
   end
 
   # Request/reply handlers
