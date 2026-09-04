@@ -141,10 +141,10 @@ defmodule BotArmyDeployPipeline.Deploy do
   defp invoke_deploy_script(script_path, bot_short, node) do
     Logger.info("[Deploy.v1] Invoking: #{script_path} #{bot_short} #{node}")
 
-    case System.cmd("bash", [script_path, bot_short, node],
-           stderr_to_stdout: true,
-           timeout: 600_000
-         ) do
+    # NOTE: System.cmd has NO :timeout option (ArgumentError). A stuck deploy
+    # blocks only this Task — salt_apply_retry.sh enforces its own SALT_TIMEOUT
+    # internally, so the script is bounded already.
+    case System.cmd("bash", [script_path, bot_short, node], stderr_to_stdout: true) do
       {output, 0} ->
         Logger.info("[Deploy.v1] Deployment succeeded on #{node}")
         Logger.debug("[Deploy.v1] Output:\n#{output}")
