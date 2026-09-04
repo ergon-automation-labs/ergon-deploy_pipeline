@@ -11,6 +11,8 @@ defmodule BotArmyDeployPipeline.Deploy do
 
   require Logger
 
+  alias BotArmyDeployPipeline.DeployLedger
+
   # ============================================================================
   # v1 Handler: Salt/launchd deployment
   # ============================================================================
@@ -105,7 +107,7 @@ defmodule BotArmyDeployPipeline.Deploy do
       nodes
       |> Enum.map(fn node ->
         case deploy_to_node(bot_short, node, release_tag, version) do
-          :ok -> {:ok, node}
+          {:ok, verification} -> {:ok, node, verification}
           {:error, reason} -> {:error, node, reason}
         end
       end)
@@ -113,8 +115,10 @@ defmodule BotArmyDeployPipeline.Deploy do
     errors = Enum.filter(results, fn r -> match?({:error, _, _}, r) end)
 
     if Enum.empty?(errors) do
+      verification = Map.new(results, fn {:ok, node, v} -> {node, v} end)
+
       Logger.info("[Deploy.v1] Successfully deployed to all nodes: #{inspect(nodes)}")
-      {:ok, %{bot: bot_short, nodes: nodes, status: :success, handler: :v1_salt_launchd}}
+      {:ok, %{bot: bot_short, nodes: nodes, status: :success, handler: :v1_salt_launchd, verification: verification}}
     else
       Logger.error("[Deploy.v1] Deployment failed on some nodes: #{inspect(errors)}")
       {:error, {:deployment_failed, errors}}
@@ -130,7 +134,7 @@ defmodule BotArmyDeployPipeline.Deploy do
 
     case File.exists?(script_path) do
       true ->
-        invoke_deploy_script(script_path, bot_short, node)
+        invoke_deploy_script(script_path, bot_short, node, release_tag, version)
 
       false ->
         Logger.error("[Deploy.v1] Script not found: #{script_path}")
@@ -138,7 +142,7 @@ defmodule BotArmyDeployPipeline.Deploy do
     end
   end
 
-  defp invoke_deploy_script(script_path, bot_short, node) do
+  defp invoke_deploy_script(script_path, bot_short, node, release_tag, version) do
     Logger.info("[Deploy.v1] Invoking: #{script_path} #{bot_short} #{node}")
 
     # Run the deploy script as abby (the deploy user with ssh keys + NOPASSWD
@@ -146,19 +150,90 @@ defmodule BotArmyDeployPipeline.Deploy do
     # shebang, so it is invoked directly — no /bin/bash prefix. From bot_army
     # (launchd) this rides the scoped sudoers rule in salt/air/users.sls; from
     # an interactive abby shell it is a no-op (self sudo).
+    #
+    # Ledger: record the dispatch BEFORE the call. When a bot redeploys the
+    # pipeline ITSELF, the launchctl kickstart in the script kills this beam
+    # mid-call — the pending record is what lets the next boot reconcile the
+    # deploy and publish the late ops.deploy.complete.
+    DeployLedger.record_dispatched(bot_short, node, version, release_tag)
+
     case System.cmd("sudo", ["-n", "-u", "abby", script_path, bot_short, node],
            stderr_to_stdout: true
          ) do
       {output, 0} ->
-        Logger.info("[Deploy.v1] Deployment succeeded on #{node}")
         Logger.debug("[Deploy.v1] Output:\n#{output}")
-        :ok
+
+        # Exit 0 is necessary but not sufficient: confirm the target node
+        # actually RUNS the deployed version (the script verified this and
+        # wrote a result record).
+        case read_verification(bot_short, node, version) do
+          {:ok, "true", detail} ->
+            Logger.info("[Deploy.v1] Verified on #{node}: beam runs v#{version} (#{detail})")
+            DeployLedger.record_finished(bot_short, node, version, "completed")
+            {:ok, true}
+
+          {:ok, "unknown", detail} ->
+            Logger.warning(
+              "[Deploy.v1] Could not verify beam version on #{node} (#{detail}) — accepting exit 0"
+            )
+
+            DeployLedger.record_finished(bot_short, node, version, "completed_unverified")
+            {:ok, :unverified}
+
+          {:error, :no_record} ->
+            Logger.warning(
+              "[Deploy.v1] No verification record for #{bot_short}/#{node} v#{version} — accepting exit 0"
+            )
+
+            DeployLedger.record_finished(bot_short, node, version, "completed_unverified")
+            {:ok, :unverified}
+
+          {:ok, "false", detail} ->
+            Logger.error("[Deploy.v1] VERIFICATION FAILED on #{node}: #{detail}")
+            DeployLedger.record_finished(bot_short, node, version, "verification_failed")
+            {:error, {:verification_failed, detail}}
+        end
 
       {output, exit_code} ->
         Logger.error("[Deploy.v1] Deployment failed on #{node} (exit code: #{exit_code})")
 
         Logger.error("[Deploy.v1] Output:\n#{output}")
+        DeployLedger.record_finished(bot_short, node, version, "failed")
         {:error, :deployment_failed}
+    end
+  end
+
+  # Read the deploy script's ground-truth verification record (written after
+  # the script confirmed the target beam runs the deployed version). Returns
+  # {:ok, verified, detail} with verified in ["true", "false", "unknown"], or
+  # {:error, :no_record} when the script predates verification or crashed.
+  defp read_verification(bot_short, node, version) do
+    path = Path.join(infra_scripts_dir(), ".deploy_results.jsonl")
+
+    case File.read(path) do
+      {:ok, content} ->
+        records =
+          content
+          |> String.split("\n", trim: true)
+          |> Enum.map(&Jason.decode/1)
+          |> Enum.filter(&match?({:ok, %{}}, &1))
+          |> Enum.map(&elem(&1, 0))
+          |> Enum.filter(fn rec ->
+            rec["bot"] == bot_short and rec["node"] == node and rec["version"] == version
+          end)
+
+        case records do
+          [] ->
+            {:error, :no_record}
+
+          _ ->
+            latest = Enum.max_by(records, &(&1["ts"] || ""))
+            {:ok, latest["verified"], latest["detail"]}
+        end
+
+      {:error, reason} ->
+        Logger.warning("[Deploy.v1] Cannot read verification records (#{inspect(reason)})")
+        {:error, :no_record}
     end
   end
 

@@ -62,7 +62,7 @@ defmodule BotArmyDeployPipeline.Application do
       # Bot-specific workers and pollers go here (GenServers that do async work)
       # Examples: Scheduler, Poller, Watcher
       # Pattern: gated with if @env == :test to prevent long-running processes in test
-      children
+      children ++ [{BotArmyDeployPipeline.DeployLedger, []}]
     end
   end
 end

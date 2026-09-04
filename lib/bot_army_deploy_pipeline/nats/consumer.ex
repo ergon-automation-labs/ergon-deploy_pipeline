@@ -1,9 +1,14 @@
 defmodule BotArmyDeployPipeline.NATS.Consumer do
   @moduledoc """
-  NATS message consumer for deploy_pipeline.
+  NATS message consumer for deploy_pipeline with split-brain routing.
 
   Subscribes to NATS subjects and routes messages to handlers.
   Uses standardized Reply format for request/reply patterns.
+
+  Split-brain routing (running on both air and mini):
+  - deploy.release.requested: generic (queue group load-balances)
+  - deploy.release.requested.air: air-only
+  - deploy.release.requested.mini: mini-only
 
   All request/reply handlers should return responses using Reply helpers:
   - BotArmyLibraryRuntime.NATS.Reply.ok(data) for success
@@ -16,16 +21,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   @reconnect_delay_ms 5000
   @version Mix.Project.config()[:version]
 
-  # Register subjects with their metadata for runtime discovery
-  @subjects [
-    %{
-      subject: "deploy.release.requested",
-      type: :subscribe,
-      description: "Triggered by make publish-release; drives Salt state.apply deploy"
-    }
-  ]
-
-  def start_link(opts) do
+  def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
@@ -36,9 +32,11 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     state = %{
       subscriptions: [],
       conn: nil,
-      opts: opts
+      opts: opts,
+      node_id: determine_node_id()
     }
 
+    Logger.info("Running on node: #{state.node_id}")
     {:ok, state, {:continue, :connect}}
   end
 
@@ -50,12 +48,16 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
         Logger.info("Connected to NATS, subscribing to topics")
 
         subscriptions =
-          ["deploy.release.requested"]
+          [
+            "deploy.release.requested",
+            "deploy.release.requested.#{state.node_id}"
+          ]
           |> Enum.map(&subscribe(conn, &1))
           |> Enum.filter(&(not is_nil(&1)))
 
         # Register subjects for runtime discovery
-        BotArmyLibraryRuntime.Registry.register("deploy_pipeline", @subjects, @version)
+        subjects = build_subjects(state.node_id)
+        BotArmyLibraryRuntime.Registry.register("deploy_pipeline", subjects, @version)
 
         {:noreply, %{state | subscriptions: subscriptions, conn: conn}}
 
@@ -66,10 +68,59 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     end
   end
 
+  # Determine which node we're on (air or mini)
+  defp determine_node_id do
+    case System.get_env("DEPLOY_NODE_ID") do
+      nil ->
+        # Fallback: detect from hostname
+        case System.cmd("hostname", []) do
+          {hostname, 0} ->
+            h = hostname |> String.trim() |> String.downcase()
+
+            if String.contains?(h, "mini") do
+              "mini"
+            else
+              "air"
+            end
+
+          _ ->
+            "air"
+        end
+
+      node_id ->
+        node_id |> String.trim() |> String.downcase()
+    end
+  end
+
+  # Build subject registry for this node
+  defp build_subjects(node_id) do
+    [
+      %{
+        subject: "deploy.release.requested",
+        type: :subscribe,
+        description: "Generic deployments (load-balanced via queue group)"
+      },
+      %{
+        subject: "deploy.release.requested.#{node_id}",
+        type: :subscribe,
+        description: "Node-specific deployments (#{node_id} only)"
+      }
+    ]
+  end
+
   defp subscribe(conn, subject) do
-    case Gnat.sub(conn, self(), subject) do
+    # Generic subjects use queue group for load-balancing; node-specific are exclusive
+    opts =
+      if String.ends_with?(subject, ".air") or String.ends_with?(subject, ".mini") do
+        []
+      else
+        [queue_group: "deploy_pipeline_bot"]
+      end
+
+    case Gnat.sub(conn, self(), subject, opts) do
       {:ok, sub} ->
-        Logger.info("Subscribed to #{subject}")
+        queue_info = if Enum.empty?(opts), do: "(exclusive)", else: "(queue group)"
+        Logger.info("Subscribed to #{subject} #{queue_info}")
         sub
 
       {:error, reason} ->
@@ -86,7 +137,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   @impl true
   def handle_info({:msg, msg}, state) do
     BotArmyLibraryRuntime.Tracing.with_consumer_span(msg.topic, Map.get(msg, :headers), fn ->
-      process_message(msg)
+      process_message(msg, state)
     end)
 
     {:noreply, state}
@@ -110,13 +161,13 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     {:noreply, state, {:continue, :connect}}
   end
 
-  defp process_message(msg) do
+  defp process_message(msg, state) do
     Logger.debug("Received NATS message on subject: #{msg.topic}")
 
     if msg.reply_to do
       handle_request_reply(msg)
     else
-      handle_pub_sub(msg)
+      handle_pub_sub(msg, state)
     end
   end
 
@@ -130,10 +181,10 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     end
   end
 
-  defp handle_pub_sub(msg) do
+  defp handle_pub_sub(msg, state) do
     case BotArmyLibraryCore.NATS.Decoder.decode(msg.body) do
       {:ok, decoded_message} ->
-        route_message(decoded_message, msg.topic)
+        route_message(decoded_message, msg.topic, state)
 
       {:error, reason} ->
         Logger.warning("Failed to decode message from #{msg.topic}: #{inspect(reason)}")
@@ -141,8 +192,10 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   end
 
   # Message routing
-  defp route_message(message, "deploy.release.requested" = topic) do
-    Logger.info("Received #{topic} — dispatching to deploy skill")
+  # (literal pattern, not a String.starts_with? guard — remote calls are not
+  # permitted in guards and only explode on full recompiles)
+  defp route_message(message, "deploy.release.requested" = topic, state) do
+    Logger.info("Received #{topic} on #{state.node_id} — dispatching to deploy skill")
     # Decoder returns the full envelope; the deploy fields live in "payload"
     payload = Map.get(message, "payload", message)
 
@@ -150,7 +203,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
       :ok ->
         # Execute asynchronously — a deploy takes minutes and blocking here
         # would stall the consumer (heartbeats, registry presence)
-        ctx = %{bot_id: "deploy_pipeline_bot"}
+        ctx = %{bot_id: "deploy_pipeline_bot", node: state.node_id}
 
         Task.start(fn ->
           case BotArmyDeployPipeline.Skills.Deploy.execute(payload, ctx) do
@@ -167,11 +220,11 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
         end)
 
       {:error, reason} ->
-        Logger.warning("[Deploy] deploy.release.requested failed validation: #{inspect(reason)}")
+        Logger.warning("[Deploy] #{topic} failed validation: #{inspect(reason)}")
     end
   end
 
-  defp route_message(_message, topic) do
+  defp route_message(_message, topic, _state) do
     Logger.debug("Routing message from #{topic}")
   end
 
