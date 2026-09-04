@@ -145,7 +145,7 @@ defmodule BotArmyDeployPipeline.Deploy do
     # sudo for salt/launchctl). From bot_army (launchd) this rides the scoped
     # sudoers rule in salt/air/users.sls; from an interactive abby shell it is
     # a no-op (self sudo).
-    case System.cmd("sudo", ["-n", "-u", "abby", "bash", script_path, bot_short, node],
+    case System.cmd("sudo", ["-n", "-u", "abby", "/bin/bash", script_path, bot_short, node],
            stderr_to_stdout: true
          ) do
       {output, 0} ->
