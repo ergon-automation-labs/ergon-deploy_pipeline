@@ -117,7 +117,7 @@ defmodule BotArmyDeployPipeline.Deploy do
       {:ok, %{bot: bot_short, nodes: nodes, status: :success, handler: :v1_salt_launchd}}
     else
       Logger.error("[Deploy.v1] Deployment failed on some nodes: #{inspect(errors)}")
-      {:error, :deployment_failed, errors}
+      {:error, {:deployment_failed, errors}}
     end
   end
 
