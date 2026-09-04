@@ -141,9 +141,30 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   end
 
   # Message routing
-  defp route_message(_message, "deploy.release.requested" = topic) do
-    Logger.debug("Received #{topic} — routed to deploy skill for processing")
-    # The deploy skill (BotArmyDeployPipeline.Skills.Deploy) handles this via the skill framework
+  defp route_message(message, "deploy.release.requested" = topic) do
+    Logger.info("Received #{topic} — dispatching to deploy skill")
+    # Decoder returns the full envelope; the deploy fields live in "payload"
+    payload = Map.get(message, "payload", message)
+
+    case BotArmyDeployPipeline.Skills.Deploy.validate(payload) do
+      :ok ->
+        # Execute asynchronously — a deploy takes minutes and blocking here
+        # would stall the consumer (heartbeats, registry presence)
+        ctx = %{bot_id: "deploy_pipeline_bot"}
+
+        Task.start(fn ->
+          case BotArmyDeployPipeline.Skills.Deploy.execute(payload, ctx) do
+            {:ok, _} ->
+              Logger.info("[Deploy] Skill execution completed: #{inspect(payload["bot"])}")
+
+            {:error, reason} ->
+              Logger.error("[Deploy] Skill execution failed: #{inspect(reason)}")
+          end
+        end)
+
+      {:error, reason} ->
+        Logger.warning("[Deploy] deploy.release.requested failed validation: #{inspect(reason)}")
+    end
   end
 
   defp route_message(_message, topic) do
