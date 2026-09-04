@@ -141,10 +141,13 @@ defmodule BotArmyDeployPipeline.Deploy do
   defp invoke_deploy_script(script_path, bot_short, node) do
     Logger.info("[Deploy.v1] Invoking: #{script_path} #{bot_short} #{node}")
 
-    # NOTE: System.cmd has NO :timeout option (ArgumentError). A stuck deploy
-    # blocks only this Task — salt_apply_retry.sh enforces its own SALT_TIMEOUT
-    # internally, so the script is bounded already.
-    case System.cmd("bash", [script_path, bot_short, node], stderr_to_stdout: true) do
+    # Run the deploy script as abby (the deploy user with ssh keys + NOPASSWD
+    # sudo for salt/launchctl). From bot_army (launchd) this rides the scoped
+    # sudoers rule in salt/air/users.sls; from an interactive abby shell it is
+    # a no-op (self sudo).
+    case System.cmd("sudo", ["-n", "-u", "abby", "bash", script_path, bot_short, node],
+           stderr_to_stdout: true
+         ) do
       {output, 0} ->
         Logger.info("[Deploy.v1] Deployment succeeded on #{node}")
         Logger.debug("[Deploy.v1] Output:\n#{output}")
