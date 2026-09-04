@@ -248,7 +248,7 @@ defmodule BotArmyDeployPipeline.DeployLedger do
         |> String.split("\n", trim: true)
         |> Enum.map(&Jason.decode/1)
         |> Enum.filter(&match?({:ok, %{}}, &1))
-        |> Enum.map(&elem(&1, 0))
+        |> Enum.map(&elem(&1, 1))
 
       {:error, _reason} ->
         []
