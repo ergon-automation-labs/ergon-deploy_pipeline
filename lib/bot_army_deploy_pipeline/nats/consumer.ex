@@ -422,13 +422,23 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   end
 
   # Message routing
-  # (literal pattern, not a String.starts_with? guard — remote calls are not
-  # permitted in guards and only explode on full recompiles)
+  # Matches "deploy.release.requested" (generic, queue-group balanced)
   defp route_message(message, "deploy.release.requested" = topic, state) do
     Logger.info("Received #{topic} on #{state.node_id} — dispatching to deploy skill")
     # Decoder returns the full envelope; the deploy fields live in "payload"
     payload = Map.get(message, "payload", message)
+    handle_deploy_message(message, topic, payload, state)
+  end
 
+  # Matches "deploy.release.requested.{node_id}" (node-specific, exclusive)
+  defp route_message(message, "deploy.release.requested." <> _node = topic, state) do
+    Logger.info("Received #{topic} on #{state.node_id} — dispatching to deploy skill")
+    # Decoder returns the full envelope; the deploy fields live in "payload"
+    payload = Map.get(message, "payload", message)
+    handle_deploy_message(message, topic, payload, state)
+  end
+
+  defp handle_deploy_message(message, topic, payload, state) do
     case BotArmyDeployPipeline.Skills.Deploy.validate(payload) do
       :ok ->
         bot = payload["bot"]
