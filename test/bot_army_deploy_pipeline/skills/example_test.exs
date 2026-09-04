@@ -114,10 +114,11 @@ defmodule BotArmyDeployPipeline.Skills.ExampleTest do
   defp mock_llm do
     %{
       request: fn prompt, opts ->
-        {:ok, %{
-          output: "mock response for: " <> prompt,
-          confidence: 0.95
-        }}
+        {:ok,
+         %{
+           output: "mock response for: " <> prompt,
+           confidence: 0.95
+         }}
       end
     }
   end

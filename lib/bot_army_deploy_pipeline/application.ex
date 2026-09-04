@@ -51,7 +51,10 @@ defmodule BotArmyDeployPipeline.Application do
     if @env == :test do
       children
     else
-      [{BotArmyDeployPipeline.NATS.Consumer, []} | children]
+      [
+        {BotArmyDeployPipeline.JobTracker, []},
+        {BotArmyDeployPipeline.NATS.Consumer, []} | children
+      ]
     end
   end
 

@@ -86,7 +86,9 @@ defmodule BotArmyDeployPipeline.PulsePublisher do
   end
 
   defp publish_system_health(%{started_at: started_at}) do
-    tenant_id = System.get_env("BOT_ARMY_TENANT_ID") || BotArmyLibraryRuntime.Tenant.default_tenant_id()
+    tenant_id =
+      System.get_env("BOT_ARMY_TENANT_ID") || BotArmyLibraryRuntime.Tenant.default_tenant_id()
+
     signal = health_signal()
 
     uptime_seconds =

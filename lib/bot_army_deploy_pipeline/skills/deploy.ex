@@ -53,7 +53,8 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
 
   @impl true
   def execute(payload, ctx) do
-    with {:ok, %{bot: bot_short, repo: repo_slug, tag: release_tag, version: version, target: target}} <-
+    with {:ok,
+          %{bot: bot_short, repo: repo_slug, tag: release_tag, version: version, target: target}} <-
            normalize_event(payload) do
       try do
         Logger.info(
@@ -136,7 +137,13 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
       "[Deploy] v1 skill: routing to Deploy.deploy_v1 for #{bot_short} (ctx.bot_id=#{ctx.bot_id})"
     )
 
-    case BotArmyDeployPipeline.Deploy.deploy_v1(bot_short, repo_slug, release_tag, version, target) do
+    case BotArmyDeployPipeline.Deploy.deploy_v1(
+           bot_short,
+           repo_slug,
+           release_tag,
+           version,
+           target
+         ) do
       {:ok, result} ->
         Logger.info("[Deploy] v1 succeeded: #{inspect(result)}")
         {:ok, Map.put(result, :version, version)}

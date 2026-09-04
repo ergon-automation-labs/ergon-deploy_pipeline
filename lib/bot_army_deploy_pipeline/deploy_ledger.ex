@@ -61,6 +61,22 @@ defmodule BotArmyDeployPipeline.DeployLedger do
     GenServer.cast(__MODULE__, {:finished, bot, node, version, status})
   end
 
+  @doc """
+  Latest ledger record for a bot+node, or nil.
+
+  Durable read backing the deploy.release.status query — the pending file
+  survives pipeline restarts (JobTracker does not), so this is the ground
+  truth for "what did we last deploy here?".
+  """
+  @spec latest(String.t(), String.t()) :: map() | nil
+  def latest(bot, node) do
+    @pending_path
+    |> read_lines()
+    |> Enum.filter(&(&1["bot"] == bot and &1["node"] == node))
+    |> Enum.sort_by(&(&1["dispatched_at"] || ""), :desc)
+    |> List.first()
+  end
+
   # -- GenServer -------------------------------------------------------------
 
   @impl true
@@ -153,8 +169,7 @@ defmodule BotArmyDeployPipeline.DeployLedger do
             )
 
             {:publish, "ops.deploy.complete",
-             %{"reconciled" => true, "verified" => true, "detail" => rec["detail"]},
-             "reconciled"}
+             %{"reconciled" => true, "verified" => true, "detail" => rec["detail"]}, "reconciled"}
 
           verified == "unknown" ->
             Logger.warning(

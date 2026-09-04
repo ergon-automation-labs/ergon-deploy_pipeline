@@ -118,7 +118,15 @@ defmodule BotArmyDeployPipeline.Deploy do
       verification = Map.new(results, fn {:ok, node, v} -> {node, v} end)
 
       Logger.info("[Deploy.v1] Successfully deployed to all nodes: #{inspect(nodes)}")
-      {:ok, %{bot: bot_short, nodes: nodes, status: :success, handler: :v1_salt_launchd, verification: verification}}
+
+      {:ok,
+       %{
+         bot: bot_short,
+         nodes: nodes,
+         status: :success,
+         handler: :v1_salt_launchd,
+         verification: verification
+       }}
     else
       Logger.error("[Deploy.v1] Deployment failed on some nodes: #{inspect(errors)}")
       {:error, {:deployment_failed, errors}}
