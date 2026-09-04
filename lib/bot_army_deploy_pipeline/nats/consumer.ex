@@ -51,9 +51,9 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
           [
             "deploy.release.requested",
             "deploy.release.requested.#{state.node_id}",
-            # Request/reply surfaces
+            # Request/reply surfaces (static subjects for request/reply handlers)
             "deploy.release.status",
-            "deploy.job.status.*"
+            "deploy.job.status"
           ]
           |> Enum.map(&subscribe(conn, &1))
           |> Enum.filter(&(not is_nil(&1)))
@@ -115,9 +115,9 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
           "Query release state by {bot, target, version?} — none|scheduled|in_progress|deployed|failed|deployed_unverified|unknown"
       },
       %{
-        subject: "deploy.job.status.*",
+        subject: "deploy.job.status",
         type: :request,
-        description: "Per-job status by job_id (deploy-bot emits request_id as the job id)"
+        description: "Query job status by job_id (body: {job_id: \"deploy-1234567890-xxxx\"})"
       }
     ]
   end
@@ -187,8 +187,8 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
 
   defp handle_request_reply(msg, state) do
     case msg.topic do
-      "deploy.job.status." <> job_id ->
-        handle_job_status(msg, job_id, state)
+      "deploy.job.status" ->
+        handle_job_status_request(msg, state)
 
       "deploy.release.status" ->
         handle_release_status(msg, state)
@@ -198,11 +198,33 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     end
   end
 
-  defp handle_job_status(msg, job_id, state) do
+  # Handle request/reply for deploy.job.status
+  # Request body: {"job_id": "deploy-1234567890-xxxx"}
+  defp handle_job_status_request(msg, state) do
+    case Jason.decode(msg.body || "{}") do
+      {:ok, %{"job_id" => job_id}} when is_binary(job_id) and job_id != "" ->
+        handle_job_status_by_id(msg, job_id, state)
+
+      {:ok, _} ->
+        response =
+          BotArmyLibraryRuntime.NATS.Reply.error("Request must include job_id", :invalid_request)
+
+        if msg.reply_to && state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
+
+      {:error, reason} ->
+        response =
+          BotArmyLibraryRuntime.NATS.Reply.error("Invalid JSON: #{inspect(reason)}", :parse_error)
+
+        if msg.reply_to && state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
+    end
+  end
+
+  # Handle job status query by ID
+  defp handle_job_status_by_id(msg, job_id, state) do
     case BotArmyDeployPipeline.JobTracker.get_job(job_id) do
       nil ->
         response = BotArmyLibraryRuntime.NATS.Reply.error("Job not found: #{job_id}", :not_found)
-        if msg.reply_to and state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
+        if msg.reply_to && state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
 
       job ->
         response_data = %{
@@ -220,7 +242,33 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
         }
 
         response = BotArmyLibraryRuntime.NATS.Reply.ok(response_data)
-        if msg.reply_to and state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
+        if msg.reply_to && state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
+    end
+  end
+
+  defp handle_job_status(msg, job_id, state) do
+    case BotArmyDeployPipeline.JobTracker.get_job(job_id) do
+      nil ->
+        response = BotArmyLibraryRuntime.NATS.Reply.error("Job not found: #{job_id}", :not_found)
+        if msg.reply_to && state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
+
+      job ->
+        response_data = %{
+          "job_id" => job.job_id,
+          "state" => Atom.to_string(job.state),
+          "bot" => job.bot,
+          "target" => job.target,
+          "version" => job.version,
+          "current_step" => job.current_step,
+          "started_at" => DateTime.to_iso8601(job.started_at),
+          "completed_at" => if(job.completed_at, do: DateTime.to_iso8601(job.completed_at)),
+          "verified_running" => job.verified_running,
+          "verified_version" => job.verified_version,
+          "error" => job.error
+        }
+
+        response = BotArmyLibraryRuntime.NATS.Reply.ok(response_data)
+        if msg.reply_to && state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
     end
   end
 
@@ -231,20 +279,36 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   # pipeline restarts).
   defp handle_release_status(msg, state) do
     response =
-      case Jason.decode(msg.body || "{}") do
-        {:ok, %{"bot" => bot} = params} when is_binary(bot) and bot != "" ->
-          target = params["target"] || state.node_id
+      try do
+        release_status_response(msg, state)
+      rescue
+        e ->
+          Logger.error(
+            "[ReleaseStatus] handler error: " <> Exception.format(:error, e, __STACKTRACE__)
+          )
 
-          BotArmyLibraryRuntime.NATS.Reply.ok(release_status(bot, target, params["version"]))
-
-        _ ->
           BotArmyLibraryRuntime.NATS.Reply.error(
-            "bot is required: {\"bot\": \"name\", \"target\": \"air\", \"version\": \"1.2.3\"}",
-            :invalid_input
+            "status lookup failed: " <> Exception.message(e),
+            :internal_error
           )
       end
 
     if state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
+  end
+
+  defp release_status_response(msg, state) do
+    case Jason.decode(msg.body || "{}") do
+      {:ok, %{"bot" => bot} = params} when is_binary(bot) and bot != "" ->
+        target = params["target"] || state.node_id
+
+        BotArmyLibraryRuntime.NATS.Reply.ok(release_status(bot, target, params["version"]))
+
+      _ ->
+        BotArmyLibraryRuntime.NATS.Reply.error(
+          "bot is required: {\"bot\": \"name\", \"target\": \"air\", \"version\": \"1.2.3\"}",
+          :invalid_input
+        )
+    end
   end
 
   defp release_status(bot, target, requested_version) do
@@ -284,7 +348,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
       finished = BotArmyDeployPipeline.JobTracker.latest_finished(bot, target) ->
         version = finished.verified_version || finished.version
 
-        if requested and version != requested do
+        if requested && version != requested do
           ledger_response(bot, target, requested)
         else
           %{
@@ -307,7 +371,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     record = BotArmyDeployPipeline.DeployLedger.latest(bot, target)
 
     cond do
-      record && requested and record["version"] != requested ->
+      record && requested && record["version"] != requested ->
         %{
           "state" => "none",
           "bot" => bot,
