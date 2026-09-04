@@ -21,16 +21,27 @@ defmodule BotArmyDeployPipeline.Deploy do
   Reads pillar to determine which node(s) run this bot, then invokes
   deploy_bot_with_summary.sh for each node.
   """
-  def deploy_v1(bot_short, repo_slug, release_tag, version) do
+  def deploy_v1(bot_short, repo_slug, release_tag, version, target \\ nil) do
     Logger.info(
-      "[Deploy.v1] Starting deployment: bot=#{bot_short} repo=#{repo_slug} tag=#{release_tag} v#{version}"
+      "[Deploy.v1] Starting deployment: bot=#{bot_short} repo=#{repo_slug} tag=#{release_tag} v=#{version} target=#{inspect(target)}"
     )
 
     try do
-      case determine_target_nodes(bot_short) do
+      nodes =
+        case normalize_target(target) do
+          {:ok, nodes} -> {:ok, nodes}
+          # No explicit target in the event — fall back to scaffolded node discovery
+          :error -> determine_target_nodes(bot_short)
+        end
+
+      case nodes do
         {:ok, [_ | _] = nodes} ->
           Logger.info("[Deploy.v1] Target nodes: #{inspect(nodes)}")
           deploy_to_nodes(bot_short, nodes, release_tag, version)
+
+        {:error, reason} ->
+          Logger.error("[Deploy.v1] Invalid target #{inspect(target)}: #{inspect(reason)}")
+          {:error, :invalid_target}
       end
     rescue
       e ->
@@ -72,12 +83,21 @@ defmodule BotArmyDeployPipeline.Deploy do
   # Private: Node Discovery & Deployment
   # ============================================================================
 
+  # Event target: "air" | "mini" (string, from deploy.release.requested).
+  # nil → no explicit target, caller falls back to scaffolded node discovery.
+  # Nodes are strings throughout so they pass safely into System.cmd args.
+  defp normalize_target(nil), do: :error
+  defp normalize_target(:air), do: {:ok, ["air"]}
+  defp normalize_target(:mini), do: {:ok, ["mini"]}
+  defp normalize_target(t) when is_binary(t) and t in ["air", "mini"], do: {:ok, [t]}
+  defp normalize_target(_), do: {:error, :unknown_node}
+
   defp determine_target_nodes(_bot_short) do
     # Scaffolded for Phase 1: will read pillar to determine which nodes run this bot.
     # Pillar entries like air.sls and mini.sls list enabled_repositories, which the actual
-    # implementation will query to return [:air] or [:mini] or [:air, :mini] as appropriate.
-    # For now, default to [:air]; Phase 1 rollout will integrate pillar lookup.
-    {:ok, [:air]}
+    # implementation will query to return ["air"] or ["mini"] or ["air", "mini"] as appropriate.
+    # For now, default to ["air"]; Phase 1 rollout will integrate pillar lookup.
+    {:ok, ["air"]}
   end
 
   defp deploy_to_nodes(bot_short, nodes, release_tag, version) do

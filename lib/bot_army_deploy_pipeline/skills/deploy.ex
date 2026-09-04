@@ -33,36 +33,64 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
   def llm_hint, do: :fast
 
   @impl true
-  def validate(%{
-        "bot" => bot,
-        "repo" => repo,
-        "tag" => tag,
-        "version" => version
-      })
-      when is_binary(bot) and is_binary(repo) and is_binary(tag) and is_binary(version) do
-    :ok
+  def validate(%{"bot" => bot, "repo" => repo, "version" => version} = payload)
+      when is_binary(bot) and is_binary(repo) and is_binary(version) do
+    tag = payload["tag"] || payload["release_tag"]
+    target = payload["target"]
+
+    if is_binary(tag) and (is_binary(target) or is_nil(target)) do
+      :ok
+    else
+      {:error,
+       "required: bot, repo, version (strings) + tag|release_tag (string); optional target (\"air\"|\"mini\")"}
+    end
   end
 
   def validate(_) do
-    {:error, "required fields: bot, repo, tag, version (all strings)"}
+    {:error,
+     "required fields: bot, repo, version (strings) + tag|release_tag (string); optional target (\"air\"|\"mini\")"}
   end
 
   @impl true
-  def execute(
-        %{"bot" => bot_short, "repo" => repo_slug, "tag" => release_tag, "version" => version},
-        ctx
-      ) do
-    try do
-      Logger.info("[Deploy] Deploying #{bot_short} v#{version} from #{repo_slug}")
+  def execute(payload, ctx) do
+    with %{bot: bot_short, repo: repo_slug, tag: release_tag, version: version, target: target} <-
+           normalize_event(payload) do
+      try do
+        Logger.info(
+          "[Deploy] Deploying #{bot_short} v#{version} from #{repo_slug} to #{target || "auto"}"
+        )
 
-      # Lookup bot metadata from pillar
-      {:ok, bot_metadata} = lookup_bot_metadata(bot_short)
-      bot_type = Map.get(bot_metadata, :bot_type, :v1)
-      deploy_via_handler(bot_type, bot_short, repo_slug, release_tag, version, ctx)
-    rescue
-      e ->
-        Logger.error("[Deploy] Execution failed: #{inspect(e)}")
-        {:error, :execution_failed}
+        # Lookup bot metadata from pillar
+        {:ok, bot_metadata} = lookup_bot_metadata(bot_short)
+        bot_type = Map.get(bot_metadata, :bot_type, :v1)
+        deploy_via_handler(bot_type, bot_short, repo_slug, release_tag, version, target, ctx)
+      rescue
+        e ->
+          Logger.error("[Deploy] Execution failed: #{inspect(e)}")
+          {:error, :execution_failed}
+      end
+    else
+      {:error, reason} ->
+        Logger.error("[Deploy] Invalid deploy.release.requested payload: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # Producers publish the release tag as either "tag" or "release_tag"
+  # (bridge and llm Makefiles publish release_tag); accept both. target is
+  # optional — nil falls back to the scaffold's node discovery.
+  defp normalize_event(payload) do
+    with tag when is_binary(tag) <- payload["tag"] || payload["release_tag"] do
+      {:ok,
+       %{
+         bot: payload["bot"],
+         repo: payload["repo"],
+         tag: tag,
+         version: payload["version"],
+         target: payload["target"]
+       }}
+    else
+      _ -> {:error, :missing_tag}
     end
   end
 
@@ -89,39 +117,43 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
   # Deployment Handlers
   # ============================================================================
 
-  defp deploy_via_handler(:v1, bot_short, repo_slug, release_tag, version, ctx) do
+  defp deploy_via_handler(:v1, bot_short, repo_slug, release_tag, version, target, ctx) do
     Logger.info("[Deploy] Routing to v1 handler (Salt/launchd) for #{bot_short}")
-    deploy_v1(bot_short, repo_slug, release_tag, version, ctx)
+    deploy_v1(bot_short, repo_slug, release_tag, version, target, ctx)
   end
 
-  defp deploy_via_handler(:v2, bot_short, repo_slug, release_tag, version, ctx) do
+  defp deploy_via_handler(:v2, bot_short, repo_slug, release_tag, version, target, ctx) do
     Logger.info("[Deploy] Routing to v2 handler (docker-compose) for #{bot_short}")
-    deploy_v2(bot_short, repo_slug, release_tag, version, ctx)
+    deploy_v2(bot_short, repo_slug, release_tag, version, target, ctx)
   end
 
   # ============================================================================
   # v1 Handler: Salt/launchd deployment
   # ============================================================================
 
-  defp deploy_v1(bot_short, repo_slug, release_tag, version, ctx) do
+  defp deploy_v1(bot_short, repo_slug, release_tag, version, target, ctx) do
     Logger.info(
       "[Deploy] v1 skill: routing to Deploy.deploy_v1 for #{bot_short} (ctx.bot_id=#{ctx.bot_id})"
     )
 
-    {:ok, result} =
-      BotArmyDeployPipeline.Deploy.deploy_v1(bot_short, repo_slug, release_tag, version)
+    case BotArmyDeployPipeline.Deploy.deploy_v1(bot_short, repo_slug, release_tag, version, target) do
+      {:ok, result} ->
+        Logger.info("[Deploy] v1 succeeded: #{inspect(result)}")
+        {:ok, Map.put(result, :version, version)}
 
-    Logger.info("[Deploy] v1 succeeded: #{inspect(result)}")
-    {:ok, Map.put(result, :version, version)}
+      {:error, reason} ->
+        Logger.error("[Deploy] v1 failed: #{inspect(reason)}")
+        {:error, :deployment_failed}
+    end
   end
 
   # ============================================================================
   # v2 Handler: docker-compose deployment (scaffolded for bot_army_v2)
   # ============================================================================
 
-  defp deploy_v2(bot_short, repo_slug, release_tag, version, ctx) do
+  defp deploy_v2(bot_short, repo_slug, release_tag, version, target, ctx) do
     Logger.info(
-      "[Deploy] v2 skill: routing to Deploy.deploy_v2 for #{bot_short} (ctx.bot_id=#{ctx.bot_id})"
+      "[Deploy] v2 skill: routing to Deploy.deploy_v2 for #{bot_short} (target=#{inspect(target)}, ctx.bot_id=#{ctx.bot_id})"
     )
 
     {:ok, result} =
