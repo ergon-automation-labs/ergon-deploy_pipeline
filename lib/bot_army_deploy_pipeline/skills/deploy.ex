@@ -53,7 +53,7 @@ defmodule BotArmyDeployPipeline.Skills.Deploy do
 
   @impl true
   def execute(payload, ctx) do
-    with %{bot: bot_short, repo: repo_slug, tag: release_tag, version: version, target: target} <-
+    with {:ok, %{bot: bot_short, repo: repo_slug, tag: release_tag, version: version, target: target}} <-
            normalize_event(payload) do
       try do
         Logger.info(
