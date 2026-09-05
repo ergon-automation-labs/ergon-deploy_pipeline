@@ -246,32 +246,6 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     end
   end
 
-  defp handle_job_status(msg, job_id, state) do
-    case BotArmyDeployPipeline.JobTracker.get_job(job_id) do
-      nil ->
-        response = BotArmyLibraryRuntime.NATS.Reply.error("Job not found: #{job_id}", :not_found)
-        if msg.reply_to && state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
-
-      job ->
-        response_data = %{
-          "job_id" => job.job_id,
-          "state" => Atom.to_string(job.state),
-          "bot" => job.bot,
-          "target" => job.target,
-          "version" => job.version,
-          "current_step" => job.current_step,
-          "started_at" => DateTime.to_iso8601(job.started_at),
-          "completed_at" => if(job.completed_at, do: DateTime.to_iso8601(job.completed_at)),
-          "verified_running" => job.verified_running,
-          "verified_version" => job.verified_version,
-          "error" => job.error
-        }
-
-        response = BotArmyLibraryRuntime.NATS.Reply.ok(response_data)
-        if msg.reply_to && state.conn, do: Gnat.pub(state.conn, msg.reply_to, response)
-    end
-  end
-
   # Body: {"bot": "name", "target": "air", "version": "1.2.3"} — target
   # optional (defaults to this node), version optional. Merges live JobTracker
   # state with the durable DeployLedger: "is it going now?" answers from
@@ -427,7 +401,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     Logger.info("Received #{topic} on #{state.node_id} — dispatching to deploy skill")
     # Decoder returns the full envelope; the deploy fields live in "payload"
     payload = Map.get(message, "payload", message)
-    handle_deploy_message(message, topic, payload, state)
+    handle_deploy_message(topic, payload, state)
   end
 
   # Matches "deploy.release.requested.{node_id}" (node-specific, exclusive)
@@ -435,10 +409,15 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
     Logger.info("Received #{topic} on #{state.node_id} — dispatching to deploy skill")
     # Decoder returns the full envelope; the deploy fields live in "payload"
     payload = Map.get(message, "payload", message)
-    handle_deploy_message(message, topic, payload, state)
+    handle_deploy_message(topic, payload, state)
   end
 
-  defp handle_deploy_message(message, topic, payload, state) do
+  # Catch-all for unknown subjects
+  defp route_message(_message, topic, _state) do
+    Logger.debug("Routing message from #{topic}")
+  end
+
+  defp handle_deploy_message(topic, payload, state) do
     case BotArmyDeployPipeline.Skills.Deploy.validate(payload) do
       :ok ->
         bot = payload["bot"]
@@ -524,10 +503,6 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
       {:error, reason} ->
         Logger.warning("[Deploy] #{topic} failed validation: #{inspect(reason)}")
     end
-  end
-
-  defp route_message(_message, topic, _state) do
-    Logger.debug("Routing message from #{topic}")
   end
 
   # Emit deployment metrics
