@@ -2,10 +2,25 @@ defmodule BotArmyDeployPipeline.JobTracker do
   @moduledoc """
   Tracks deployment job state: creation, progress, completion, errors.
 
-  Uses NATS JetStream KV store for durability and cluster-wide visibility:
-  - Jobs persist across restarts
-  - Queryable from any node in the NATS cluster
-  - Single source of truth (no split-brain)
+  **Current backend:** ETS (in-memory, cluster-aware via split-brain)
+  **Planned backend:** NATS JetStream KV store for cluster-wide single source of truth
+
+  Current limitations:
+  - Jobs stored per-node in ETS (no cross-node visibility)
+  - Deploy to air → queryable on air; deploy to mini → queryable on mini
+
+  Migration plan to JetStream KV:
+  1. Add `:jetstream` dependency to mix.exs
+  2. Replace kv_put/get/list stubs with Jetstream.API.KeyValue calls
+  3. Uncomment serialization helpers (normalize_for_json, decode_job, parse_datetime)
+  4. Update bucket name in @kv_bucket
+  5. Handle connection pooling for KV ops
+
+  Benefits of JetStream KV:
+  - Single source of truth across all nodes
+  - Queryable from any NATS endpoint
+  - Persisted across restarts
+  - Built-in replication and failover
 
   Provides:
   - Job creation with unique ID
@@ -17,9 +32,6 @@ defmodule BotArmyDeployPipeline.JobTracker do
 
   use GenServer
   require Logger
-
-  @kv_bucket "bot-army-jobs"
-  @reconnect_delay_ms 5000
 
   @type job_state :: :pending | :in_progress | :completed | :failed
   @type job_info :: %{
