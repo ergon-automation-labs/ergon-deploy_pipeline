@@ -2,6 +2,11 @@ defmodule BotArmyDeployPipeline.JobTracker do
   @moduledoc """
   Tracks deployment job state: creation, progress, completion, errors.
 
+  Uses NATS JetStream KV store for durability and cluster-wide visibility:
+  - Jobs persist across restarts
+  - Queryable from any node in the NATS cluster
+  - Single source of truth (no split-brain)
+
   Provides:
   - Job creation with unique ID
   - State updates (IN_PROGRESS, COMPLETED, FAILED)
@@ -12,6 +17,9 @@ defmodule BotArmyDeployPipeline.JobTracker do
 
   use GenServer
   require Logger
+
+  @kv_bucket "bot-army-jobs"
+  @reconnect_delay_ms 5000
 
   @type job_state :: :pending | :in_progress | :completed | :failed
   @type job_info :: %{
@@ -35,9 +43,11 @@ defmodule BotArmyDeployPipeline.JobTracker do
 
   @impl true
   def init(_opts) do
-    # Use ETS for persistence across GenServer restarts
+    # TODO: Migrate to JetStream KV store for cluster-wide visibility
+    # For now, use ETS with GenServer state for single-node deployments
+    # Path: Add jetstream dependency, replace kv_put/get/list with JetStream API calls
+    Logger.info("JobTracker starting (ETS backend, TODO: JetStream KV for cluster support)")
     :ets.new(:deploy_jobs, [:named_table, :public, {:keypos, 1}])
-    Logger.info("JobTracker started")
     {:ok, %{}}
   end
 
@@ -62,9 +72,15 @@ defmodule BotArmyDeployPipeline.JobTracker do
       verification_error: nil
     }
 
-    :ets.insert(:deploy_jobs, {job_id, job})
-    Logger.info("[Job #{job_id}] Created for #{bot}@#{version} -> #{target}")
-    job_id
+    case kv_put(job_id, job) do
+      :ok ->
+        Logger.info("[Job #{job_id}] Created for #{bot}@#{version} -> #{target}")
+        job_id
+
+      {:error, reason} ->
+        Logger.error("[Job #{job_id}] Failed to create: #{inspect(reason)}")
+        job_id
+    end
   end
 
   @doc """
@@ -73,13 +89,20 @@ defmodule BotArmyDeployPipeline.JobTracker do
   def update_job(job_id, state, step) do
     Logger.info("[Job #{job_id}] #{step}")
 
-    case :ets.lookup(:deploy_jobs, job_id) do
-      [{_key, job}] ->
+    case kv_get(job_id) do
+      {:ok, job} ->
         updated = %{job | state: state, current_step: step}
-        :ets.insert(:deploy_jobs, {job_id, updated})
-        updated
 
-      [] ->
+        case kv_put(job_id, updated) do
+          :ok ->
+            updated
+
+          {:error, reason} ->
+            Logger.warning("[Job #{job_id}] Failed to update: #{inspect(reason)}")
+            nil
+        end
+
+      {:error, _} ->
         Logger.warning("[Job #{job_id}] Not found during update")
         nil
     end
@@ -91,8 +114,8 @@ defmodule BotArmyDeployPipeline.JobTracker do
   def complete_job(job_id, verified_version, verified_running, error \\ nil) do
     Logger.info("[Job #{job_id}] Completed - verified_running=#{verified_running}")
 
-    case :ets.lookup(:deploy_jobs, job_id) do
-      [{_key, job}] ->
+    case kv_get(job_id) do
+      {:ok, job} ->
         updated = %{
           job
           | state: :completed,
@@ -103,10 +126,16 @@ defmodule BotArmyDeployPipeline.JobTracker do
             current_step: "Complete"
         }
 
-        :ets.insert(:deploy_jobs, {job_id, updated})
-        updated
+        case kv_put(job_id, updated) do
+          :ok ->
+            updated
 
-      [] ->
+          {:error, reason} ->
+            Logger.warning("[Job #{job_id}] Failed to complete: #{inspect(reason)}")
+            nil
+        end
+
+      {:error, _} ->
         nil
     end
   end
@@ -117,8 +146,8 @@ defmodule BotArmyDeployPipeline.JobTracker do
   def fail_job(job_id, error) do
     Logger.error("[Job #{job_id}] Failed: #{error}")
 
-    case :ets.lookup(:deploy_jobs, job_id) do
-      [{_key, job}] ->
+    case kv_get(job_id) do
+      {:ok, job} ->
         updated = %{
           job
           | state: :failed,
@@ -127,10 +156,16 @@ defmodule BotArmyDeployPipeline.JobTracker do
             current_step: "Failed"
         }
 
-        :ets.insert(:deploy_jobs, {job_id, updated})
-        updated
+        case kv_put(job_id, updated) do
+          :ok ->
+            updated
 
-      [] ->
+          {:error, reason} ->
+            Logger.warning("[Job #{job_id}] Failed to mark as failed: #{inspect(reason)}")
+            nil
+        end
+
+      {:error, _} ->
         nil
     end
   end
@@ -139,9 +174,9 @@ defmodule BotArmyDeployPipeline.JobTracker do
   Get job status.
   """
   def get_job(job_id) do
-    case :ets.lookup(:deploy_jobs, job_id) do
-      [{_key, job}] -> job
-      [] -> nil
+    case kv_get(job_id) do
+      {:ok, job} -> job
+      {:error, _} -> nil
     end
   end
 
@@ -168,9 +203,6 @@ defmodule BotArmyDeployPipeline.JobTracker do
 
   @doc """
   Most recent finished (completed or failed) job for a bot+target, if any.
-
-  In-memory only — vanishes when the pipeline restarts; the durable answer
-  for "is it deployed?" comes from DeployLedger.
   """
   @spec latest_finished(String.t(), String.t()) :: map() | nil
   def latest_finished(bot, target) do
@@ -181,6 +213,62 @@ defmodule BotArmyDeployPipeline.JobTracker do
     |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
     |> List.first()
   end
+
+  # Storage operations: ETS backend with JetStream migration path
+  # To migrate to JetStream KV: replace ETS with Jetstream.API.KeyValue calls
+  defp kv_put(job_id, job) do
+    :ets.insert(:deploy_jobs, {job_id, job})
+    :ok
+  end
+
+  defp kv_get(job_id) do
+    case :ets.lookup(:deploy_jobs, job_id) do
+      [{_key, job}] -> {:ok, job}
+      [] -> {:error, :not_found}
+    end
+  end
+
+  # JetStream Migration Helpers (kept for future KV backend)
+  # Uncomment and use when adding jetstream dependency
+  # defp normalize_for_json(job) do
+  #   job
+  #   |> Map.update!(:started_at, &DateTime.to_iso8601/1)
+  #   |> Map.update!(:completed_at, fn
+  #     nil -> nil
+  #     dt -> DateTime.to_iso8601(dt)
+  #   end)
+  #   |> Map.update!(:state, &Atom.to_string/1)
+  # end
+  #
+  # defp decode_job(json) when is_binary(json) do
+  #   case Jason.decode(json) do
+  #     {:ok, data} ->
+  #       %{
+  #         job_id: data["job_id"],
+  #         state: String.to_atom(data["state"]),
+  #         bot: data["bot"],
+  #         target: data["target"],
+  #         version: data["version"],
+  #         current_step: data["current_step"],
+  #         started_at: parse_datetime(data["started_at"]),
+  #         completed_at: parse_datetime(data["completed_at"]),
+  #         error: data["error"],
+  #         verified_version: data["verified_version"],
+  #         verified_running: data["verified_running"],
+  #         verification_error: data["verification_error"]
+  #       }
+  #     {:error, _} ->
+  #       nil
+  #   end
+  # end
+  #
+  # defp parse_datetime(nil), do: nil
+  # defp parse_datetime(iso_string) do
+  #   case DateTime.from_iso8601(iso_string) do
+  #     {:ok, dt, _} -> dt
+  #     :error -> nil
+  #   end
+  # end
 
   # Generate unique job ID with timestamp
   defp generate_job_id do

@@ -446,6 +446,14 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
         version = payload["version"]
         request_id = payload["request_id"]
 
+        # Inject the resolved target into the payload (2026-09-05 deploy parity):
+        # the skill reads payload["target"] independently — without this, a
+        # node-subject event (.mini) validated fine but the skill saw target=nil
+        # and deploy.ex's Phase-1 node-discovery stub answered ["air"], so mini
+        # tried to deploy to air. The consumer's resolution (event target or this
+        # node's identity) is authoritative for the whole pipeline.
+        payload = Map.put(payload, "target", target)
+
         # Dedup guard: one in-flight deploy per bot+target. A second event for
         # the same release (double-fired deploy-bot, two sessions racing) is
         # rejected here instead of racing the first — the surviving job still
