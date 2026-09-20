@@ -178,12 +178,36 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   defp process_message(msg, state) do
     Logger.debug("Received NATS message on subject: #{msg.topic}")
 
-    if msg.reply_to do
-      handle_request_reply(msg, state)
-    else
-      handle_pub_sub(msg, state)
+    case route_kind(msg.topic, msg.reply_to) do
+      :deploy -> handle_pub_sub(msg, state)
+      :request_reply -> handle_request_reply(msg, state)
+      :pub_sub -> handle_pub_sub(msg, state)
     end
   end
+
+  @doc """
+  Decide how an inbound message is dispatched.
+
+  Deploy requests (`deploy.release.requested`, `deploy.release.requested.<node>`)
+  are always dispatched to the deploy skill — whether the producer used pub/sub
+  or request/reply. Deciding by `reply_to` alone sent every request-style deploy
+  into `handle_request_reply/2`, which only serves the status subjects: the
+  request was dropped at debug level and the producer saw an empty ack while
+  nothing was deployed. The bot-side `make publish-release` target uses
+  `nats request`, so that path carried the fleet's normal deploy requests.
+  """
+  @spec route_kind(binary, binary | nil) :: :deploy | :request_reply | :pub_sub
+  def route_kind(topic, reply_to) do
+    cond do
+      deploy_request_subject?(topic) -> :deploy
+      is_binary(reply_to) and reply_to != "" -> :request_reply
+      true -> :pub_sub
+    end
+  end
+
+  defp deploy_request_subject?("deploy.release.requested"), do: true
+  defp deploy_request_subject?("deploy.release.requested." <> _node), do: true
+  defp deploy_request_subject?(_topic), do: false
 
   defp handle_request_reply(msg, state) do
     case msg.topic do
@@ -388,7 +412,7 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
   defp handle_pub_sub(msg, state) do
     case BotArmyLibraryCore.NATS.Decoder.decode(msg.body) do
       {:ok, decoded_message} ->
-        route_message(decoded_message, msg.topic, state)
+        route_message(decoded_message, msg.topic, msg.reply_to, state)
 
       {:error, reason} ->
         Logger.warning("Failed to decode message from #{msg.topic}: #{inspect(reason)}")
@@ -397,27 +421,27 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
 
   # Message routing
   # Matches "deploy.release.requested" (generic, queue-group balanced)
-  defp route_message(message, "deploy.release.requested" = topic, state) do
+  defp route_message(message, "deploy.release.requested" = topic, reply_to, state) do
     Logger.info("Received #{topic} on #{state.node_id} — dispatching to deploy skill")
     # Decoder returns the full envelope; the deploy fields live in "payload"
     payload = Map.get(message, "payload", message)
-    handle_deploy_message(topic, payload, state)
+    handle_deploy_message(topic, payload, reply_to, state)
   end
 
   # Matches "deploy.release.requested.{node_id}" (node-specific, exclusive)
-  defp route_message(message, "deploy.release.requested." <> _node = topic, state) do
+  defp route_message(message, "deploy.release.requested." <> _node = topic, reply_to, state) do
     Logger.info("Received #{topic} on #{state.node_id} — dispatching to deploy skill")
     # Decoder returns the full envelope; the deploy fields live in "payload"
     payload = Map.get(message, "payload", message)
-    handle_deploy_message(topic, payload, state)
+    handle_deploy_message(topic, payload, reply_to, state)
   end
 
   # Catch-all for unknown subjects
-  defp route_message(_message, topic, _state) do
+  defp route_message(_message, topic, _reply_to, _state) do
     Logger.debug("Routing message from #{topic}")
   end
 
-  defp handle_deploy_message(topic, payload, state) do
+  defp handle_deploy_message(topic, payload, reply_to, state) do
     case BotArmyDeployPipeline.Skills.Deploy.validate(payload) do
       :ok ->
         bot = payload["bot"]
@@ -447,6 +471,21 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
               job_id,
               :in_progress,
               "Syncing bot to #{target}"
+            )
+
+            # Ack before the async work: the producer only needs to know the job
+            # was accepted, and a deploy takes minutes.
+            deploy_ack(
+              reply_to,
+              %{
+                "status" => "accepted",
+                "job_id" => job_id,
+                "bot" => bot,
+                "target" => target,
+                "version" => version,
+                "request_id" => request_id
+              },
+              state
             )
 
             # Execute asynchronously — a deploy takes minutes and blocking here
@@ -493,6 +532,17 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
               "[Deploy] DUPLICATE REJECTED: #{bot} v#{version} -> #{target} — job #{active.job_id} (v#{active.version}) already #{active.state}"
             )
 
+            deploy_ack(
+              reply_to,
+              %{
+                "status" => "rejected",
+                "reason" => "duplicate_in_progress",
+                "existing_job_id" => active.job_id,
+                "existing_version" => active.version
+              },
+              state
+            )
+
             publish_deploy_outcome("ops.deploy.rejected", bot, payload, %{
               reason: "duplicate_in_progress",
               existing_job_id: active.job_id,
@@ -502,8 +552,28 @@ defmodule BotArmyDeployPipeline.NATS.Consumer do
 
       {:error, reason} ->
         Logger.warning("[Deploy] #{topic} failed validation: #{inspect(reason)}")
+
+        deploy_ack(
+          reply_to,
+          %{
+            "status" => "rejected",
+            "reason" => "invalid_payload",
+            "detail" => inspect(reason)
+          },
+          state
+        )
     end
   end
+
+  # A deploy request made with `nats request` (as the bot-side publish-release
+  # target does) gets an ack; a plain pub/sub event gets none.
+  defp deploy_ack(reply_to, payload, state) when is_binary(reply_to) and reply_to != "" do
+    if state.conn do
+      Gnat.pub(state.conn, reply_to, BotArmyLibraryRuntime.NATS.Reply.ok(payload))
+    end
+  end
+
+  defp deploy_ack(_reply_to, _payload, _state), do: :ok
 
   # Emit deployment metrics
   defp emit_deploy_metric(bot, target, version, verified_running) do
