@@ -313,7 +313,44 @@ defmodule BotArmyDeployPipeline.DeployLedger do
 
     if updated != lines do
       rewrite_lines(@pending_path, updated)
+      # Also update fleet state when deployment completes
+      if status in ["completed", "failed"] do
+        record_fleet_state(bot, version, node, status)
+      end
     end
+  end
+
+  defp record_fleet_state(bot, version, node, deploy_status) do
+    fleet_log_path = "/var/log/bot_army/fleet_state.jsonl"
+
+    record = %{
+      "bot" => bot,
+      "version" => version,
+      "pid" => nil,
+      "host" => node,
+      "status" => if(deploy_status == "completed", do: "deployed", else: "deploy_failed"),
+      "last_seen" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "updated_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+
+    case File.mkdir_p(Path.dirname(fleet_log_path)) do
+      :ok ->
+        case File.write(fleet_log_path, Jason.encode!(record) <> "\n", [:append]) do
+          :ok ->
+            Logger.info(
+              "[Ledger] Recorded deploy event for #{bot}/#{node} v#{version}: #{deploy_status}"
+            )
+
+          {:error, reason} ->
+            Logger.warning("[Ledger] Failed to record fleet state for #{bot}: #{inspect(reason)}")
+        end
+
+      {:error, reason} ->
+        Logger.warning("[Ledger] Failed to create fleet state directory: #{inspect(reason)}")
+    end
+  rescue
+    e ->
+      Logger.error("[Ledger] Exception recording fleet state: #{inspect(e)}")
   end
 
   defp prune_old(lines, now) do
